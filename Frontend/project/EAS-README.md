@@ -22,6 +22,14 @@ Steps to build a custom Android dev client (APK) with EAS and include the native
 4) Configure gradle/CMake
    # If build fails, add CMakeLists reference in android/app/build.gradle under externalNativeBuild
 
+Extra: automated copy script
+--------------------------------
+After running `expo prebuild --platform android`, you can run the helper script to copy the native files and patch the Gradle file automatically:
+
+   node ./scripts/setup-native.js
+
+This script will copy Java/C++ files from `android-native/` into the generated `android/` project and attempt to add the `externalNativeBuild` CMake block to `android/app/build.gradle`.
+
 5) Build with EAS (development profile creates an installable APK)
    eas build --profile development --platform android
 
