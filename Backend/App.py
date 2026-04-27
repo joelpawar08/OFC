@@ -7,10 +7,12 @@ import json
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
+import os
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from Logic import ModelManager, ChatEngine, DEFAULT_MODEL
@@ -44,11 +46,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Configure CORS with a safe, environment-configurable policy.
+#
+# - In development you can set ALLOWED_ORIGINS to a comma-separated list
+#   like: http://localhost:19006,http://localhost:19000,https://expo.dev
+# - To allow Expo Go/dev clients (exp://...) we use allow_origin_regex.
+# - For a fully open policy set ALLOWED_ORIGINS="*" (not recommended in prod).
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:19006,http://localhost:19000,https://expo.dev",
+)
+if ALLOWED_ORIGINS.strip() == "*":
+    allow_origins = ["*"]
+else:
+    allow_origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
+
+# Allow Expo Go scheme origins (exp://...) used by the Expo client.
+allow_origin_regex = r"^exp://.*"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # lock this down in production
+    allow_origins=allow_origins,
+    allow_origin_regex=allow_origin_regex if allow_origins != ["*"] else None,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -108,6 +129,24 @@ def list_models():
     Returns catalogue of available models with download status.
     """
     return {"models": model_manager.list_models()}
+
+
+@app.get("/models/{model_id}/file", tags=["Models"])
+def download_model_file(model_id: str):
+    """
+    Serve the downloaded model file for direct device download.
+    The mobile app can call this endpoint to fetch the GGUF file once
+    it has been downloaded by the server.
+    """
+    try:
+        path = model_manager.get_model_path(model_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Unknown model")
+
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Model file not found")
+
+    return FileResponse(path=str(path), media_type='application/octet-stream', filename=path.name)
 
 
 # ──────────────────────────────────────────────
