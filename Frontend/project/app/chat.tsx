@@ -35,7 +35,7 @@ let messageIdCounter = 0;
 const newId = () => `msg-${++messageIdCounter}`;
 
 export default function ChatScreen() {
-  const [fontsLoaded] = useFonts({
+  const [fontsLoaded, fontError] = useFonts({
     'Inter-Regular': Inter_400Regular,
     'Inter-Medium': Inter_500Medium,
     'Inter-SemiBold': Inter_600SemiBold,
@@ -177,8 +177,9 @@ export default function ChatScreen() {
     router.replace('/download');
   };
 
-  if (!fontsLoaded) return null;
+  if (fontError) throw fontError;
 
+  // Render immediately; fonts will enhance appearance as they load
   return (
     <KeyboardAvoidingView
       style={styles.root}
