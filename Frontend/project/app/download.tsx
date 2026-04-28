@@ -8,6 +8,7 @@ import {
   ScrollView,
   Platform,
   Image,
+  Alert,
 } from 'react-native';
 import { router } from 'expo-router';
 import * as FileSystem from 'expo-file-system';
@@ -56,32 +57,48 @@ export default function DownloadScreen() {
 
   const checkStatus = async () => {
     try {
-      const [status, modelsRes] = await Promise.all([api.status(), api.listModels()]);
+      const modelsRes = await api.listModels();
       const m = modelsRes.models[0];
       setModel(m);
 
-      if (status.model_downloaded) {
-        if (!status.model_loaded) {
-          await api.loadModel();
-        }
-        router.replace('/chat');
+      // Check if model exists on device
+      const FS: any = FileSystem as any;
+      const baseDir = FS.documentDirectory ?? FS.cacheDirectory ?? '';
+      const fileUri = baseDir + m.id + '.gguf';
+      
+      const fileInfo = await FileSystem.getInfoAsync(fileUri);
+      
+      // If model exists on device, show save/load options
+      if (fileInfo.exists && fileInfo.size && fileInfo.size > 1000000) {
+        setSavedFileUri(fileUri);
+        setScreenState('ready');
+        console.log('Model found on device at:', fileUri, 'Size:', fileInfo.size);
         return;
       }
 
-      if (status.download.status === 'downloading') {
-        setScreenState('downloading');
-        startPolling();
-      } else {
+      // Check backend status
+      try {
+        const status = await api.status();
+        if (status.download.status === 'downloading') {
+          setScreenState('downloading');
+          startPolling();
+        } else {
+          setScreenState('ready');
+        }
+      } catch {
         setScreenState('ready');
       }
-    } catch {
-      setError('Cannot reach the local server.\nMake sure the Python server is running on port 8000.');
+    } catch (e) {
+      console.log('Error in checkStatus:', e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      setError(`Failed to connect to backend.\n\nError: ${errorMsg}\n\nMake sure:\n1. Render backend is running\n2. Network is connected\n3. Try again in a moment (Render free tier may be starting)`);
       setScreenState('error');
     }
   };
 
   const startPolling = () => {
     if (pollingRef.current) clearInterval(pollingRef.current);
+    let lastNotifTime = Date.now();
     pollingRef.current = setInterval(async () => {
       try {
         const p = await api.downloadProgress();
@@ -92,25 +109,35 @@ export default function DownloadScreen() {
           useNativeDriver: false,
         }).start();
 
+        // Update progress display every 5 seconds
+        const now = Date.now();
+        if (now - lastNotifTime > 5000) {
+          console.log(`Downloading Model: Progress: ${p.percent.toFixed(1)}% (${p.downloaded_mb.toFixed(0)}/${p.total_mb.toFixed(0)} MB)`);
+          lastNotifTime = now;
+        }
+
         if (p.status === 'done') {
           clearInterval(pollingRef.current!);
           setScreenState('done');
+          Alert.alert('Download Complete', 'Model is ready. Loading into memory...');
           await api.loadModel();
           setTimeout(() => router.replace('/chat'), 1200);
         } else if (p.status === 'error') {
           clearInterval(pollingRef.current!);
           setError(p.error ?? 'Download failed');
           setScreenState('error');
+          Alert.alert('Download Failed', p.error ?? 'Unknown error');
         }
       } catch {
         // keep polling even on transient network hiccups
       }
-    }, 1000);
+    }, 500);
   };
 
   const handleDownload = async () => {
     try {
       setError(null);
+      Alert.alert('Starting Download', 'Model download has started...');
       await api.startDownload();
       setScreenState('downloading');
       startPolling();
@@ -119,9 +146,12 @@ export default function DownloadScreen() {
     }
   };
 
-  const handleRetry = () => {
+  const handleRetry = async () => {
     setError(null);
     setScreenState('connecting');
+    // Wait a moment for backend to wake up if it was sleeping
+    console.log('⏳ Waiting for backend to wake up...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
     checkStatus();
   };
 
@@ -129,19 +159,27 @@ export default function DownloadScreen() {
     if (!model) return;
     try {
       setError(null);
+      setScreenState('downloading');
+      
       const url = api.modelFileUrl(model.id);
-  const FS: any = FileSystem as any;
-  const baseDir = FS.documentDirectory ?? FS.cacheDirectory ?? '';
-  const fileUri = baseDir + model.id + '.gguf';
+      const FS: any = FileSystem as any;
+      const baseDir = FS.documentDirectory ?? FS.cacheDirectory ?? '';
+      const fileUri = baseDir + model.id + '.gguf';
+      
+      console.log('🔍 Starting device download...');
+      console.log('📍 Download URL:', url);
+      console.log('💾 Save path:', fileUri);
+      console.log('📊 Expected size:', model.size_mb, 'MB');
 
       const downloadResumable = FileSystem.createDownloadResumable(
         url,
         fileUri,
         {},
-        (progress) => {
-          const written = progress.totalBytesWritten ?? 0;
-          const total = progress.totalBytesExpectedToWrite ?? (model.size_mb * 1_000_000);
+        (downloadProgress) => {
+          const written = downloadProgress.totalBytesWritten ?? 0;
+          const total = downloadProgress.totalBytesExpectedToWrite ?? (model.size_mb * 1_000_000);
           const pct = total > 0 ? (written / total) * 100 : 0;
+          
           setProgress(() => ({
             status: 'downloading',
             model_id: model.id,
@@ -151,15 +189,26 @@ export default function DownloadScreen() {
             speed_mbps: 0,
             error: null,
           }));
+          
+          console.log(`⬇️ Progress: ${pct.toFixed(1)}% - ${(written / 1e6).toFixed(2)}/${(total / 1e6).toFixed(2)} MB`);
         }
       );
 
       const { uri } = await downloadResumable.downloadAsync();
-      console.log('Model saved to', uri);
+      
+      // Verify file was actually saved
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      console.log('✅ Download complete!');
+      console.log('📁 File saved at:', uri);
+      console.log('📦 Actual file size:', (fileInfo as any).size, 'bytes');
+      
       setSavedFileUri(uri);
-      alert('Model file saved to device storage.');
+      setScreenState('ready');
+      Alert.alert('✅ Success', `Model saved to device!\n\nPath: ${uri}\nSize: ${((fileInfo as any).size / 1e6).toFixed(0)} MB`);
     } catch (e: unknown) {
+      console.error('❌ Download failed:', e);
       setError(e instanceof Error ? e.message : 'Failed to save model');
+      setScreenState('error');
     }
   };
 
